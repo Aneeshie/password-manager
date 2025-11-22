@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Command: get
 cmd_get() {
     check_session
     
@@ -9,7 +8,6 @@ cmd_get() {
         read -p "Service: " SERVICE
     fi
     
-    # Fetch encrypted password
     ENCRYPTED=$(db_query "SELECT encrypted_password FROM entries WHERE service='$SERVICE';")
     
     if [ -z "$ENCRYPTED" ]; then
@@ -17,7 +15,6 @@ cmd_get() {
         exit 1
     fi
     
-    # Decrypt
     DECRYPTED=$(decrypt_data "$ENCRYPTED")
     
     if [ $? -ne 0 ]; then
@@ -56,7 +53,6 @@ cmd_get() {
     log_audit "VIEW" "$SERVICE"
 }
 
-# Command: search
 cmd_search() {
     check_session
     

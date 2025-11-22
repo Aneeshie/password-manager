@@ -8,7 +8,6 @@ cmd_init() {
 
     echo "Initializing new vault..."
     
-    # Prompt for master password
     read -s -p "Enter master password: " PASS1
     echo
     read -s -p "Confirm master password: " PASS2

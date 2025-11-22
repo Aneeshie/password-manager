@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Command: unlock
 cmd_unlock() {
     if [ -f "$SESSION_FILE" ]; then
         echo "Vault is already unlocked."
@@ -19,12 +18,16 @@ cmd_unlock() {
     SALT=$(db_query "SELECT value FROM config WHERE key='salt';")
     STORED_HASH=$(db_query "SELECT value FROM config WHERE key='master_hash';")
 
+    # echo "DEBUG: SALT=$SALT"
+    # echo "DEBUG: STORED_HASH=$STORED_HASH"
+
     # Verify
     CHECK_HASH=$(echo -n "${SALT}${PASS}" | openssl dgst -sha256 | awk '{print $2}')
+    
+    # echo "DEBUG: CHECK_HASH=$CHECK_HASH"
 
     if [ "$CHECK_HASH" == "$STORED_HASH" ]; then
         echo "Success. Vault unlocked."
-        # Store password in session file (restricted)
         touch "$SESSION_FILE"
         chmod 600 "$SESSION_FILE"
         echo -n "$PASS" > "$SESSION_FILE"
@@ -36,7 +39,6 @@ cmd_unlock() {
     fi
 }
 
-# Command: lock
 cmd_lock() {
     if [ -f "$SESSION_FILE" ]; then
         rm -f "$SESSION_FILE"

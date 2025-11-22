@@ -9,7 +9,6 @@ cmd_add() {
         read -p "Service: " SERVICE
     fi
     
-    # Check if exists
     EXISTS=$(db_query "SELECT count(*) FROM entries WHERE service='$SERVICE';")
     if [ "$EXISTS" -gt 0 ]; then
         echo "Error: Service '$SERVICE' already exists."
@@ -32,7 +31,6 @@ cmd_add() {
     # Encrypt
     ENCRYPTED=$(encrypt_data "$PASSWORD")
     
-    # Insert
     sqlite3 "$DB_FILE" "INSERT INTO entries (service, username, encrypted_password, updated_at) VALUES ('$SERVICE', '$USERNAME', '$ENCRYPTED', datetime('now'));"
     
     if [ $? -eq 0 ]; then
@@ -44,7 +42,6 @@ cmd_add() {
     fi
 }
 
-# Command: list
 cmd_list() {
     check_session
     

@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Command: audit
 cmd_audit() {
     check_session
     
@@ -9,7 +8,6 @@ cmd_audit() {
     db_query_formatted "SELECT timestamp, action, service FROM audit ORDER BY timestamp DESC;"
 }
 
-# Command: backup
 cmd_backup() {
     check_session
     
@@ -18,7 +16,6 @@ cmd_backup() {
     
     echo "Creating backup: $BACKUP_FILE"
     
-    # Encrypt the database file
     openssl enc -aes-256-cbc -pbkdf2 -salt -pass file:"$SESSION_FILE" -in "$DB_FILE" -out "$BACKUP_FILE"
     
     if [ $? -eq 0 ]; then
@@ -30,7 +27,6 @@ cmd_backup() {
     fi
 }
 
-# Command: restore
 cmd_restore() {
     BACKUP_FILE="$1"
     if [ -z "$BACKUP_FILE" ]; then
@@ -54,16 +50,13 @@ cmd_restore() {
     read -s -p "Enter master password for this backup: " PASS
     echo
     
-    # Decrypt to temp file
     TEMP_DB="${DB_FILE}.restore.tmp"
     openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$PASS" -in "$BACKUP_FILE" -out "$TEMP_DB" 2>/dev/null
     
     if [ $? -eq 0 ]; then
-        # Verify it's a valid SQLite DB
         if sqlite3 "$TEMP_DB" "PRAGMA integrity_check;" &>/dev/null; then
             mv "$TEMP_DB" "$DB_FILE"
             echo "Restore successful."
-            # If session exists, it might be invalid if password changed. Lock vault.
             rm -f "$SESSION_FILE"
             echo "Vault locked. Please unlock with the restored password."
         else

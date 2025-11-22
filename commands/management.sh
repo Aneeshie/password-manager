@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Command: edit
 cmd_edit() {
     check_session
     
@@ -9,7 +8,6 @@ cmd_edit() {
         read -p "Service: " SERVICE
     fi
     
-    # Check if exists
     EXISTS=$(db_query "SELECT count(*) FROM entries WHERE service='$SERVICE';")
     if [ "$EXISTS" -eq 0 ]; then
         echo "Error: Service '$SERVICE' not found."
@@ -43,7 +41,6 @@ cmd_edit() {
     esac
 }
 
-# Command: delete
 cmd_delete() {
     check_session
     
@@ -52,7 +49,6 @@ cmd_delete() {
         read -p "Service: " SERVICE
     fi
     
-    # Check if exists
     EXISTS=$(db_query "SELECT count(*) FROM entries WHERE service='$SERVICE';")
     if [ "$EXISTS" -eq 0 ]; then
         echo "Error: Service '$SERVICE' not found."
