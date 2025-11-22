@@ -1,0 +1,447 @@
+#!/bin/bash
+
+# Constants
+VAULT_DIR="$HOME/.vault"
+DB_FILE="$VAULT_DIR/vault.db"
+SESSION_FILE="$VAULT_DIR/.session"
+
+# Ensure vault directory exists
+mkdir -p "$VAULT_DIR"
+
+# Helper: Log to audit table
+log_audit() {
+    local action="$1"
+    local service="$2"
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    sqlite3 "$DB_FILE" "INSERT INTO audit (action, service, timestamp) VALUES ('$action', '$service', '$timestamp');"
+}
+
+# Helper: Check session
+check_session() {
+    if [ ! -f "$SESSION_FILE" ]; then
+        echo "Error: Vault is locked. Run 'vault unlock' first."
+        exit 1
+    fi
+    # Check if session is stale (optional, e.g. > 15 mins)
+    # For now, just return success
+    return 0
+}
+
+# Helper: Get session key
+get_session_key() {
+    cat "$SESSION_FILE"
+}
+
+# Command: init
+cmd_init() {
+    if [ -f "$DB_FILE" ]; then
+        echo "Error: Vault already initialized at $DB_FILE"
+        exit 1
+    fi
+
+    echo "Initializing new vault..."
+    
+    # Prompt for master password
+    read -s -p "Enter master password: " PASS1
+    echo
+    read -s -p "Confirm master password: " PASS2
+    echo
+
+    if [ "$PASS1" != "$PASS2" ]; then
+        echo "Error: Passwords do not match."
+        exit 1
+    fi
+
+    if [ -z "$PASS1" ]; then
+        echo "Error: Password cannot be empty."
+        exit 1
+    fi
+
+    # Generate salt (16 bytes hex)
+    SALT=$(openssl rand -hex 16)
+
+    # Hash password for verification
+    HASH=$(echo -n "${SALT}${PASS1}" | openssl dgst -sha256 | awk '{print $2}')
+
+    # Create DB
+    sqlite3 "$DB_FILE" <<EOF
+CREATE TABLE config (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+CREATE TABLE entries (
+    service TEXT PRIMARY KEY,
+    username TEXT,
+    encrypted_password TEXT,
+    iv TEXT,
+    updated_at TEXT
+);
+CREATE TABLE audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT,
+    service TEXT,
+    timestamp TEXT
+);
+INSERT INTO config (key, value) VALUES ('salt', '$SALT');
+INSERT INTO config (key, value) VALUES ('master_hash', '$HASH');
+EOF
+
+    if [ $? -eq 0 ]; then
+        echo "Vault initialized successfully."
+        log_audit "INIT" "SYSTEM"
+    else
+        echo "Error: Failed to initialize database."
+        rm -f "$DB_FILE"
+        exit 1
+    fi
+}
+
+# Command: unlock
+cmd_unlock() {
+    if [ -f "$SESSION_FILE" ]; then
+        echo "Vault is already unlocked."
+        exit 0
+    fi
+
+    if [ ! -f "$DB_FILE" ]; then
+        echo "Error: Vault not initialized. Run 'vault init' first."
+        exit 1
+    fi
+
+    read -s -p "Enter master password: " PASS
+    echo
+
+    # Retrieve salt and hash
+    SALT=$(sqlite3 "$DB_FILE" "SELECT value FROM config WHERE key='salt';")
+    STORED_HASH=$(sqlite3 "$DB_FILE" "SELECT value FROM config WHERE key='master_hash';")
+
+    # Verify
+    CHECK_HASH=$(echo -n "${SALT}${PASS}" | openssl dgst -sha256 | awk '{print $2}')
+
+    if [ "$CHECK_HASH" == "$STORED_HASH" ]; then
+        echo "Success. Vault unlocked."
+        # Store password in session file (restricted)
+        touch "$SESSION_FILE"
+        chmod 600 "$SESSION_FILE"
+        echo -n "$PASS" > "$SESSION_FILE"
+        log_audit "UNLOCK" "SYSTEM"
+    else
+        echo "Error: Invalid password."
+        log_audit "FAILED_LOGIN" "SYSTEM"
+        exit 1
+    fi
+}
+
+# Command: lock
+cmd_lock() {
+    if [ -f "$SESSION_FILE" ]; then
+        rm -f "$SESSION_FILE"
+        echo "Vault locked."
+        log_audit "LOCK" "SYSTEM"
+    else
+        echo "Vault is already locked."
+    fi
+}
+
+# Command: add
+cmd_add() {
+    check_session
+    
+    SERVICE="$1"
+    if [ -z "$SERVICE" ]; then
+        read -p "Service: " SERVICE
+    fi
+    
+    # Check if exists
+    EXISTS=$(sqlite3 "$DB_FILE" "SELECT count(*) FROM entries WHERE service='$SERVICE';")
+    if [ "$EXISTS" -gt 0 ]; then
+        echo "Error: Service '$SERVICE' already exists."
+        exit 1
+    fi
+
+    read -p "Username: " USERNAME
+    
+    read -p "Generate password? (y/n): " GEN
+    if [[ "$GEN" =~ ^[Yy]$ ]]; then
+        read -p "Length (default 20): " LEN
+        LEN=${LEN:-20}
+        PASSWORD=$(openssl rand -base64 48 | cut -c1-$LEN)
+        echo "Generated Password: $PASSWORD"
+    else
+        read -s -p "Password: " PASSWORD
+        echo
+    fi
+
+    # Encrypt
+    # Using pbkdf2 with random salt, base64 output
+    ENCRYPTED=$(echo -n "$PASSWORD" | openssl enc -aes-256-cbc -pbkdf2 -a -salt -pass file:"$SESSION_FILE")
+    
+    # Insert
+    sqlite3 "$DB_FILE" "INSERT INTO entries (service, username, encrypted_password, updated_at) VALUES ('$SERVICE', '$USERNAME', '$ENCRYPTED', datetime('now'));"
+    
+    if [ $? -eq 0 ]; then
+        echo "Entry added successfully."
+        log_audit "ADD" "$SERVICE"
+    else
+        echo "Error: Failed to add entry."
+        exit 1
+    fi
+}
+
+# Command: list
+cmd_list() {
+    check_session
+    
+    echo "Services in vault:"
+    echo "------------------"
+    sqlite3 -header -column "$DB_FILE" "SELECT service, username, updated_at FROM entries;"
+}
+
+# Command: get
+cmd_get() {
+    check_session
+    
+    SERVICE="$1"
+    if [ -z "$SERVICE" ]; then
+        read -p "Service: " SERVICE
+    fi
+    
+    # Fetch encrypted password
+    ENCRYPTED=$(sqlite3 "$DB_FILE" "SELECT encrypted_password FROM entries WHERE service='$SERVICE';")
+    
+    if [ -z "$ENCRYPTED" ]; then
+        echo "Error: Service '$SERVICE' not found."
+        exit 1
+    fi
+    
+    # Decrypt
+    DECRYPTED=$(echo "$ENCRYPTED" | openssl enc -d -aes-256-cbc -pbkdf2 -a -pass file:"$SESSION_FILE" 2>/dev/null)
+    
+    if [ $? -ne 0 ]; then
+        echo "Error: Decryption failed. Session key might be invalid."
+        exit 1
+    fi
+    
+    echo "Service: $SERVICE"
+    echo "Select action:"
+    echo "  [r] Reveal password"
+    echo "  [c] Copy to clipboard"
+    echo "  [q] Quit"
+    read -p "Action: " ACTION
+    
+    case "$ACTION" in
+        r|R)
+            echo "Password: $DECRYPTED"
+            ;;
+        c|C)
+            if command -v pbcopy &> /dev/null; then
+                echo -n "$DECRYPTED" | pbcopy
+                echo "Password copied to clipboard."
+            elif command -v xclip &> /dev/null; then
+                echo -n "$DECRYPTED" | xclip -selection clipboard
+                echo "Password copied to clipboard."
+            else
+                echo "Error: No clipboard utility found (pbcopy/xclip)."
+                echo "Password: $DECRYPTED"
+            fi
+            ;;
+        *)
+            echo "Cancelled."
+            ;;
+    esac
+    
+    log_audit "VIEW" "$SERVICE"
+}
+
+# Command: edit
+cmd_edit() {
+    check_session
+    
+    SERVICE="$1"
+    if [ -z "$SERVICE" ]; then
+        read -p "Service: " SERVICE
+    fi
+    
+    # Check if exists
+    EXISTS=$(sqlite3 "$DB_FILE" "SELECT count(*) FROM entries WHERE service='$SERVICE';")
+    if [ "$EXISTS" -eq 0 ]; then
+        echo "Error: Service '$SERVICE' not found."
+        exit 1
+    fi
+    
+    echo "Editing service: $SERVICE"
+    echo "1. Edit Username"
+    echo "2. Edit Password"
+    echo "3. Cancel"
+    read -p "Choice: " CHOICE
+    
+    case "$CHOICE" in
+        1)
+            read -p "New Username: " NEW_USER
+            sqlite3 "$DB_FILE" "UPDATE entries SET username='$NEW_USER', updated_at=datetime('now') WHERE service='$SERVICE';"
+            echo "Username updated."
+            log_audit "EDIT" "$SERVICE"
+            ;;
+        2)
+            read -s -p "New Password: " NEW_PASS
+            echo
+            ENCRYPTED=$(echo -n "$NEW_PASS" | openssl enc -aes-256-cbc -pbkdf2 -a -salt -pass file:"$SESSION_FILE")
+            sqlite3 "$DB_FILE" "UPDATE entries SET encrypted_password='$ENCRYPTED', updated_at=datetime('now') WHERE service='$SERVICE';"
+            echo "Password updated."
+            log_audit "EDIT" "$SERVICE"
+            ;;
+        *)
+            echo "Cancelled."
+            ;;
+    esac
+}
+
+# Command: delete
+cmd_delete() {
+    check_session
+    
+    SERVICE="$1"
+    if [ -z "$SERVICE" ]; then
+        read -p "Service: " SERVICE
+    fi
+    
+    # Check if exists
+    EXISTS=$(sqlite3 "$DB_FILE" "SELECT count(*) FROM entries WHERE service='$SERVICE';")
+    if [ "$EXISTS" -eq 0 ]; then
+        echo "Error: Service '$SERVICE' not found."
+        exit 1
+    fi
+    
+    read -p "Are you sure you want to delete '$SERVICE'? (y/n): " CONFIRM
+    if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
+        sqlite3 "$DB_FILE" "DELETE FROM entries WHERE service='$SERVICE';"
+        echo "Service deleted."
+        log_audit "DELETE" "$SERVICE"
+    else
+        echo "Cancelled."
+    fi
+}
+
+# Command: audit
+cmd_audit() {
+    check_session
+    
+    echo "Audit Log:"
+    echo "----------"
+    sqlite3 -header -column "$DB_FILE" "SELECT timestamp, action, service FROM audit ORDER BY timestamp DESC;"
+}
+
+# Command: backup
+cmd_backup() {
+    check_session
+    
+    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+    BACKUP_FILE="vault_backup_${TIMESTAMP}.enc"
+    
+    echo "Creating backup: $BACKUP_FILE"
+    
+    # Encrypt the database file
+    openssl enc -aes-256-cbc -pbkdf2 -salt -pass file:"$SESSION_FILE" -in "$DB_FILE" -out "$BACKUP_FILE"
+    
+    if [ $? -eq 0 ]; then
+        echo "Backup created successfully."
+        log_audit "BACKUP" "SYSTEM"
+    else
+        echo "Error: Backup failed."
+        exit 1
+    fi
+}
+
+# Command: restore
+cmd_restore() {
+    BACKUP_FILE="$1"
+    if [ -z "$BACKUP_FILE" ]; then
+        echo "Usage: vault restore <backup_file>"
+        exit 1
+    fi
+    
+    if [ ! -f "$BACKUP_FILE" ]; then
+        echo "Error: Backup file '$BACKUP_FILE' not found."
+        exit 1
+    fi
+    
+    echo "Restoring from: $BACKUP_FILE"
+    echo "Warning: This will overwrite the current vault."
+    read -p "Are you sure? (y/n): " CONFIRM
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        echo "Cancelled."
+        exit 0
+    fi
+    
+    read -s -p "Enter master password for this backup: " PASS
+    echo
+    
+    # Decrypt to temp file
+    TEMP_DB="${DB_FILE}.restore.tmp"
+    openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$PASS" -in "$BACKUP_FILE" -out "$TEMP_DB" 2>/dev/null
+    
+    if [ $? -eq 0 ]; then
+        # Verify it's a valid SQLite DB
+        if sqlite3 "$TEMP_DB" "PRAGMA integrity_check;" &>/dev/null; then
+            mv "$TEMP_DB" "$DB_FILE"
+            echo "Restore successful."
+            # If session exists, it might be invalid if password changed. Lock vault.
+            rm -f "$SESSION_FILE"
+            echo "Vault locked. Please unlock with the restored password."
+        else
+            echo "Error: Restored file is corrupt or invalid password."
+            rm -f "$TEMP_DB"
+            exit 1
+        fi
+    else
+        echo "Error: Decryption failed. Invalid password."
+        exit 1
+    fi
+}
+
+# Main Dispatch
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+    init)
+        cmd_init
+        ;;
+    unlock)
+        cmd_unlock
+        ;;
+    lock)
+        cmd_lock
+        ;;
+    add)
+        cmd_add "$1"
+        ;;
+    list)
+        cmd_list
+        ;;
+    get)
+        cmd_get "$1"
+        ;;
+    search)
+        cmd_search "$1"
+        ;;
+    edit)
+        cmd_edit "$1"
+        ;;
+    delete)
+        cmd_delete "$1"
+        ;;
+    audit)
+        cmd_audit
+        ;;
+    backup)
+        cmd_backup
+        ;;
+    restore)
+        cmd_restore "$1"
+        ;;
+    *)
+        echo "Usage: $0 {init|unlock|lock|add|list|get|search|edit|delete|audit|backup|restore}"
+        exit 1
+        ;;
+esac

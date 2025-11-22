@@ -1,0 +1,198 @@
+
+PASSWORD MANAGER FLOW (SQLite + OpenSSL)
+=========================================
+
+This document describes the complete operational flow for a CLI-based password manager
+using SQLite for structure and OpenSSL for encryption.
+
+Tech: openssl, base64, grep, sqlite3 
+
+--------------------------------------------------
+0. Overall Life Cycle
+--------------------------------------------------
+Every command follows this sequence:
+1. User enters command
+2. App authenticates master password
+3. Vault unlocked
+4. Action executed
+5. Audit logged
+6. Vault locked again
+
+--------------------------------------------------
+1. Initialization Flow
+--------------------------------------------------
+Command:
+vault init
+
+Steps:
+- Prompt for master password
+- Confirm master password
+- Generate salt
+- Create SQLite database:
+  - entries table
+  - audit table
+- Store hashed master password and salt
+- Vault is now initialized
+
+--------------------------------------------------
+2. Unlock / Login Flow
+--------------------------------------------------
+Command:
+vault unlock
+
+Steps:
+- Prompt for master password
+- Hash and compare
+- If correct → session starts
+- If incorrect → log failed attempt
+- 3 failed attempts → temporary lock
+- Session expires after inactivity
+
+--------------------------------------------------
+3. Add Password Flow
+--------------------------------------------------
+Command:
+vault add <service>
+
+Steps:
+- Verify active session
+- Prompt for:
+  - username
+  - generate password? (y/n)
+- If generated:
+  - ask for length & complexity
+- Encrypt password using OpenSSL
+- Store in SQLite
+- Log audit: ADD | service | timestamp
+
+--------------------------------------------------
+4. Search Flow
+--------------------------------------------------
+Command:
+vault search <term>
+
+Steps:
+- Query SQLite using LIKE
+- Display matching services
+- Option to select specific entry
+
+--------------------------------------------------
+5. View Password Flow
+--------------------------------------------------
+Command:
+vault get <service>
+
+Steps:
+- Verify session
+- Fetch encrypted password
+- Decrypt in memory
+- Show options:
+  - reveal
+  - copy to clipboard
+  - mask output
+- Log audit: VIEW | service | timestamp
+
+--------------------------------------------------
+6. Edit Entry Flow
+--------------------------------------------------
+Command:
+vault edit <service>
+
+Steps:
+- Display current fields
+- Choose field to modify
+- Re-encrypt if password updated
+- Update SQLite
+- Log audit: EDIT | service | timestamp
+
+--------------------------------------------------
+7. Delete Entry Flow
+--------------------------------------------------
+Command:
+vault delete <service>
+
+Steps:
+- Confirm deletion
+- Remove entry from DB
+- Log audit: DELETE | service | timestamp
+
+--------------------------------------------------
+8. Audit Trail Flow
+--------------------------------------------------
+Command:
+vault audit
+
+Displays:
+- ADD, VIEW, EDIT, DELETE actions
+- FAILED LOGIN attempts
+- Timestamps for each action
+
+--------------------------------------------------
+9. Backup & Restore Flow
+--------------------------------------------------
+Backup:
+vault backup
+- Creates encrypted timestamped copy of DB
+
+Restore:
+vault restore <file>
+- Verifies master password
+- Overwrites current vault
+
+--------------------------------------------------
+10. Lock / Logout Flow
+--------------------------------------------------
+Command:
+vault lock
+
+Steps:
+- Clears session
+- Removes key from memory
+- Vault locked
+
+--------------------------------------------------
+Command Summary
+--------------------------------------------------
+vault init
+vault unlock
+vault add <service>
+vault get <service>
+vault list
+vault search <term>
+vault edit <service>
+vault delete <service>
+vault audit
+vault backup
+vault restore <file>
+vault lock
+
+--------------------------------------------------
+Internal Execution Flow
+--------------------------------------------------
+User Command
+   ↓
+Check Session
+   ↓
+Decrypt Key
+   ↓
+Execute SQL Query
+   ↓
+Encrypt Sensitive Data
+   ↓
+Write Audit Log
+   ↓
+Auto-lock if timeout
+
+--------------------------------------------------
+Recommended Build Order
+--------------------------------------------------
+1. Init + Master Password
+2. Unlock system
+3. Add + List
+4. Encryption layer
+5. Get + Search
+6. Audit trail
+7. Backup system
+8. UX polish
+
+End of File.
