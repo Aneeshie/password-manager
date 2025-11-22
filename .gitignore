@@ -1,0 +1,14 @@
+# Vault Data
+.vault/
+vault.db
+.session
+
+#instructions
+instructions.txt
+
+# Backups
+*.enc
+vault_backup_*
+
+# System
+.DS_Store
